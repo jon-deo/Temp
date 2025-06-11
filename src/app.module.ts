@@ -10,14 +10,16 @@ import { AuthModule } from './modules/auth/auth.module';
 import { TaskProcessorModule } from './queues/task-processor/task-processor.module';
 import { ScheduledTasksModule } from './queues/scheduled-tasks/scheduled-tasks.module';
 import { CacheService } from './common/services/cache.service';
+import jwtConfig from './config/jwt.config';
 
 @Module({
   imports: [
     // Configuration
     ConfigModule.forRoot({
       isGlobal: true,
+      load: [jwtConfig],
     }),
-    
+
     // Database
     TypeOrmModule.forRootAsync({
       imports: [ConfigModule],
@@ -34,10 +36,10 @@ import { CacheService } from './common/services/cache.service';
         logging: configService.get('NODE_ENV') === 'development',
       }),
     }),
-    
+
     // Scheduling
     ScheduleModule.forRoot(),
-    
+
     // Queue
     BullModule.forRootAsync({
       imports: [ConfigModule],
@@ -49,7 +51,7 @@ import { CacheService } from './common/services/cache.service';
         },
       }),
     }),
-    
+
     // Rate limiting
     ThrottlerModule.forRootAsync({
       imports: [ConfigModule],
@@ -61,12 +63,12 @@ import { CacheService } from './common/services/cache.service';
         },
       ]),
     }),
-    
+
     // Feature modules
     UsersModule,
     TasksModule,
     AuthModule,
-    
+
     // Queue processing modules
     TaskProcessorModule,
     ScheduledTasksModule,
@@ -82,4 +84,4 @@ import { CacheService } from './common/services/cache.service';
     CacheService
   ]
 })
-export class AppModule {} 
+export class AppModule { } 
