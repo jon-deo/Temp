@@ -10,26 +10,26 @@ export class AuthService {
   constructor(
     private readonly usersService: UsersService,
     private readonly jwtService: JwtService,
-  ) {}
+  ) { }
 
   async login(loginDto: LoginDto) {
     const { email, password } = loginDto;
 
     const user = await this.usersService.findByEmail(email);
-    
+
     if (!user) {
       throw new UnauthorizedException('Invalid email');
     }
 
     const passwordValid = await bcrypt.compare(password, user.password);
-    
+
     if (!passwordValid) {
       throw new UnauthorizedException('Invalid password');
     }
 
-    const payload = { 
-      sub: user.id, 
-      email: user.email, 
+    const payload = {
+      sub: user.id,
+      email: user.email,
       role: user.role
     };
 
@@ -72,15 +72,26 @@ export class AuthService {
 
   async validateUser(userId: string): Promise<any> {
     const user = await this.usersService.findOne(userId);
-    
+
     if (!user) {
       return null;
     }
-    
+
     return user;
   }
 
   async validateUserRoles(userId: string, requiredRoles: string[]): Promise<boolean> {
-    return true;
+    if (!requiredRoles || requiredRoles.length === 0) {
+      return true; // No specific roles required
+    }
+
+    const user = await this.usersService.findOne(userId);
+
+    if (!user) {
+      return false; // User not found
+    }
+
+    // Check if user has any of the required roles
+    return requiredRoles.includes(user.role);
   }
 } 
