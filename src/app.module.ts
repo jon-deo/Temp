@@ -9,7 +9,7 @@ import { TasksModule } from './modules/tasks/tasks.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { TaskProcessorModule } from './queues/task-processor/task-processor.module';
 import { ScheduledTasksModule } from './queues/scheduled-tasks/scheduled-tasks.module';
-import { CacheService } from './common/services/cache.service';
+import { CommonModule } from './common/common.module';
 import jwtConfig from './config/jwt.config';
 
 @Module({
@@ -64,6 +64,9 @@ import jwtConfig from './config/jwt.config';
       ]),
     }),
 
+    // Common services module
+    CommonModule,
+
     // Feature modules
     UsersModule,
     TasksModule,
@@ -74,14 +77,10 @@ import jwtConfig from './config/jwt.config';
     ScheduledTasksModule,
   ],
   providers: [
-    // Inefficient: Global cache service with no configuration options
-    // This creates a single in-memory cache instance shared across all modules
-    CacheService
+    // Common services are now provided by CommonModule
   ],
   exports: [
-    // Exporting the cache service makes it available to other modules
-    // but creates tight coupling
-    CacheService
+    // Common services are exported by CommonModule
   ]
 })
 export class AppModule { } 
