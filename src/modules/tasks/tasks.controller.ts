@@ -9,6 +9,7 @@ import { TaskStatus } from './enums/task-status.enum';
 import { RateLimitGuard } from '../../common/guards/rate-limit.guard';
 import { RateLimit } from '../../common/decorators/rate-limit.decorator';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { QueryPerformanceService } from '../../common/services/query-performance.service';
 
 @ApiTags('tasks')
 @Controller('tasks')
@@ -18,6 +19,7 @@ import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 export class TasksController {
   constructor(
     private readonly tasksService: TasksService,
+    private readonly queryPerformanceService: QueryPerformanceService,
     // ✅ OPTIMIZED: Removed direct repository access, using service layer properly
   ) { }
 
@@ -44,6 +46,44 @@ export class TasksController {
   async getStats() {
     // ✅ OPTIMIZED: Use SQL aggregation instead of loading all tasks into memory
     return this.tasksService.getTaskStatistics();
+  }
+
+  @Get('performance')
+  @ApiOperation({ summary: 'Get database performance metrics and index usage' })
+  @ApiResponse({
+    status: 200,
+    description: 'Performance metrics retrieved successfully'
+  })
+  async getPerformanceMetrics() {
+    try {
+      // ✅ MONITORING: Get comprehensive performance metrics
+      const [indexUsage, tableStats, slowQueries] = await Promise.all([
+        this.queryPerformanceService.checkIndexUsage(),
+        this.queryPerformanceService.getTableStats(),
+        this.queryPerformanceService.analyzeSlowQueries(),
+      ]);
+
+      return {
+        success: true,
+        timestamp: new Date().toISOString(),
+        metrics: {
+          indexUsage,
+          tableStats,
+          slowQueries,
+        },
+        summary: {
+          indexesActive: indexUsage.indexStats.filter(stat => stat.idx_scan > 0).length,
+          totalIndexes: indexUsage.indexStats.length,
+          tableSize: tableStats.tableSize,
+          rowCount: tableStats.rowCount,
+        }
+      };
+    } catch (error) {
+      throw new HttpException(
+        `Failed to get performance metrics: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        HttpStatus.INTERNAL_SERVER_ERROR
+      );
+    }
   }
 
   @Get(':id')

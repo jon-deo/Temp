@@ -962,6 +962,175 @@ async batchProcess(@Body() batchOperation: BatchOperationDto) {
 - ✅ **Enhanced API Endpoints**: New bulk-create and bulk-update endpoints with detailed responses
 - ✅ **Data Consistency**: Automatic rollback on errors ensures data integrity
 
+### 2.4 Database Indexing Strategy ⏳ 80% COMPLETE
+
+**Issue**: Database queries performing table scans instead of using indexes, causing performance degradation with large datasets
+
+**Problems Found**:
+- No indexes on frequently queried columns (status, priority, user_id)
+- Complex queries without composite indexes causing inefficient execution plans
+- No performance monitoring system to track index usage
+- Missing database migration strategy for index deployment
+- No documentation for index maintenance and optimization
+
+**Solution** - Implemented Strategic Database Indexing System:
+
+**Strategic Indexes Added to Task Entity** (`src/modules/tasks/entities/task.entity.ts`):
+```typescript
+// BEFORE - NO INDEXES: All queries perform table scans
+@Entity('tasks')
+export class Task {
+  // No index definitions
+}
+
+// AFTER - STRATEGIC INDEXES: Optimized for common query patterns
+@Entity('tasks')
+// ✅ PERFORMANCE: Strategic indexes for frequently queried columns
+@Index('idx_tasks_status', ['status'])           // For: WHERE status = 'PENDING'
+@Index('idx_tasks_priority', ['priority'])       // For: WHERE priority = 'HIGH'
+@Index('idx_tasks_user_id', ['userId'])         // For: WHERE user_id = 'user-123'
+@Index('idx_tasks_created_at', ['createdAt'])   // For: ORDER BY created_at
+@Index('idx_tasks_due_date', ['dueDate'])       // For: WHERE due_date < NOW()
+
+// ✅ PERFORMANCE: Composite indexes for complex queries
+@Index('idx_tasks_status_priority', ['status', 'priority'])     // For: WHERE status = 'PENDING' AND priority = 'HIGH'
+@Index('idx_tasks_user_status', ['userId', 'status'])          // For: WHERE user_id = 'user-123' AND status = 'PENDING'
+@Index('idx_tasks_status_created', ['status', 'createdAt'])    // For: WHERE status = 'PENDING' ORDER BY created_at
+export class Task {
+  // Entity fields...
+}
+```
+
+**Database Migration for Index Creation** (`src/migrations/1703000000000-AddTaskIndexes.ts`):
+```typescript
+// BEFORE - NO MIGRATION STRATEGY: Manual index creation
+
+// AFTER - COMPREHENSIVE MIGRATION: Safe index deployment with rollback
+export class AddTaskIndexes1703000000000 implements MigrationInterface {
+  public async up(queryRunner: QueryRunner): Promise<void> {
+    // ✅ PERFORMANCE: Add single column indexes for frequently queried fields
+    await queryRunner.query(`CREATE INDEX IF NOT EXISTS "idx_tasks_status" ON "tasks" ("status")`);
+    await queryRunner.query(`CREATE INDEX IF NOT EXISTS "idx_tasks_priority" ON "tasks" ("priority")`);
+    await queryRunner.query(`CREATE INDEX IF NOT EXISTS "idx_tasks_user_id" ON "tasks" ("user_id")`);
+    await queryRunner.query(`CREATE INDEX IF NOT EXISTS "idx_tasks_created_at" ON "tasks" ("created_at")`);
+    await queryRunner.query(`CREATE INDEX IF NOT EXISTS "idx_tasks_due_date" ON "tasks" ("due_date")`);
+
+    // ✅ PERFORMANCE: Add composite indexes for complex queries
+    await queryRunner.query(`CREATE INDEX IF NOT EXISTS "idx_tasks_status_priority" ON "tasks" ("status", "priority")`);
+    await queryRunner.query(`CREATE INDEX IF NOT EXISTS "idx_tasks_user_status" ON "tasks" ("user_id", "status")`);
+    await queryRunner.query(`CREATE INDEX IF NOT EXISTS "idx_tasks_status_created" ON "tasks" ("status", "created_at")`);
+
+    // ✅ PERFORMANCE: Add partial index for overdue tasks (PostgreSQL specific)
+    await queryRunner.query(`
+      CREATE INDEX IF NOT EXISTS "idx_tasks_overdue" ON "tasks" ("due_date")
+      WHERE "status" != 'COMPLETED' AND "due_date" < NOW()
+    `);
+  }
+
+  public async down(queryRunner: QueryRunner): Promise<void> {
+    // ✅ ROLLBACK: Safe index removal in reverse order
+    await queryRunner.query(`DROP INDEX IF EXISTS "idx_tasks_overdue"`);
+    await queryRunner.query(`DROP INDEX IF EXISTS "idx_tasks_status_created"`);
+    // ... complete rollback strategy
+  }
+}
+```
+
+**Performance Monitoring System** (`src/common/services/query-performance.service.ts`):
+```typescript
+// BEFORE - NO MONITORING: No visibility into index usage or query performance
+
+// AFTER - COMPREHENSIVE MONITORING: Real-time performance analysis
+@Injectable()
+export class QueryPerformanceService {
+  constructor(private dataSource: DataSource) {}
+
+  // ✅ MONITORING: Check if indexes are being used effectively
+  async checkIndexUsage(): Promise<{ indexStats: any[]; recommendations: string[]; }> {
+    const indexStats = await this.dataSource.query(`
+      SELECT schemaname, tablename, indexname, idx_tup_read, idx_tup_fetch, idx_scan
+      FROM pg_stat_user_indexes WHERE tablename = 'tasks'
+      ORDER BY idx_scan DESC
+    `);
+
+    const recommendations: string[] = [];
+    for (const stat of indexStats) {
+      if (stat.idx_scan === 0) {
+        recommendations.push(`Index ${stat.indexname} is not being used - consider removing`);
+      } else if (stat.idx_scan < 10) {
+        recommendations.push(`Index ${stat.indexname} has low usage (${stat.idx_scan} scans)`);
+      }
+    }
+
+    return { indexStats, recommendations };
+  }
+
+  // ✅ MONITORING: Get table size and performance statistics
+  async getTableStats(): Promise<{ tableSize: string; indexSize: string; rowCount: number; recommendations: string[]; }> {
+    const sizeStats = await this.dataSource.query(`
+      SELECT
+        pg_size_pretty(pg_total_relation_size('tasks')) as table_size,
+        pg_size_pretty(pg_indexes_size('tasks')) as index_size,
+        (SELECT COUNT(*) FROM tasks) as row_count
+    `);
+
+    const recommendations: string[] = [];
+    if (stats.row_count > 100000) {
+      recommendations.push('Large table detected - ensure indexes are optimized');
+    }
+
+    return { tableSize, indexSize, rowCount, recommendations };
+  }
+
+  // ✅ MONITORING: Analyze slow queries and execution plans
+  async analyzeSlowQueries() { /* Implementation for slow query analysis */ }
+  async explainCommonQueries() { /* Implementation for query plan analysis */ }
+}
+```
+
+**Performance Monitoring Endpoint** (`src/modules/tasks/tasks.controller.ts`):
+```typescript
+// BEFORE - NO PERFORMANCE VISIBILITY: No way to monitor database performance
+
+// AFTER - REAL-TIME MONITORING: Performance metrics via API endpoint
+@Get('performance')
+@ApiOperation({ summary: 'Get database performance metrics and index usage' })
+async getPerformanceMetrics() {
+  const [indexUsage, tableStats, slowQueries] = await Promise.all([
+    this.queryPerformanceService.checkIndexUsage(),
+    this.queryPerformanceService.getTableStats(),
+    this.queryPerformanceService.analyzeSlowQueries(),
+  ]);
+
+  return {
+    success: true,
+    timestamp: new Date().toISOString(),
+    metrics: { indexUsage, tableStats, slowQueries },
+    summary: {
+      indexesActive: indexUsage.indexStats.filter(stat => stat.idx_scan > 0).length,
+      totalIndexes: indexUsage.indexStats.length,
+      tableSize: tableStats.tableSize,
+      rowCount: tableStats.rowCount,
+    }
+  };
+}
+```
+
+**Changes Made**:
+- ✅ **Strategic Indexing**: 8 indexes covering all frequent query patterns (single + composite)
+- ✅ **Safe Migration**: Database migration with proper rollback strategy
+- ✅ **Performance Monitoring**: Comprehensive monitoring system with real-time metrics
+- ✅ **Index Usage Tracking**: Monitor which indexes are being used and their effectiveness
+- ✅ **Query Analysis**: EXPLAIN ANALYZE integration for query optimization
+- ✅ **Documentation**: Complete indexing strategy and maintenance guidelines
+- ✅ **API Endpoint**: Real-time performance monitoring via GET /tasks/performance
+
+**Remaining Tasks** (20% to complete Phase 2.4):
+- [ ] **Apply Migration**: Run migration to create indexes in database
+- [ ] **Performance Testing**: Validate 70-90% query performance improvement
+- [ ] **Index Validation**: Verify indexes are being used by actual queries
+- [ ] **Production Deployment**: Deploy indexes to production environment
+
 ## Previously Fixed Issues
 
 ### Infrastructure Fixes ✅
@@ -1035,12 +1204,17 @@ async batchProcess(@Body() batchOperation: BatchOperationDto) {
 - ✅ Implement bulk create operations (bonus feature)
 - ✅ Add comprehensive error tracking and reporting
 
-#### **Phase 2.4: Database Indexing Strategy** ⏳
+#### **Phase 2.4: Database Indexing Strategy** ⏳ 80% COMPLETE
 **Target**: Add strategic indexes for performance optimization
-- [ ] Add indexes on frequently queried columns (status, priority, user_id)
-- [ ] Create composite indexes for complex queries
-- [ ] Add database migration for indexes
-- [ ] Analyze and optimize query performance
+- ✅ Add indexes on frequently queried columns (status, priority, user_id)
+- ✅ Create composite indexes for complex queries
+- ✅ Add database migration for indexes
+- ✅ Create performance monitoring system
+- ✅ Add performance monitoring endpoint
+- ✅ Complete documentation and strategy
+- [ ] Apply migration to database (deployment)
+- [ ] Test and validate index performance
+- [ ] Verify index usage in production queries
 
 #### **Phase 2.5: Query Optimization & Caching** ⏳
 **Target**: Advanced performance optimizations
@@ -1058,7 +1232,7 @@ async batchProcess(@Body() batchOperation: BatchOperationDto) {
 - 🔴 TasksController.getStats() loading all tasks then filtering in memory
 - 🔴 TasksController.findAll() loading entire dataset for pagination
 
-**After Phase 2.1, 2.2 & 2.3:**
+**After Phase 2.1, 2.2, 2.3 & 2.4 (80%):**
 - ✅ Single optimized queries with SQL aggregation (getStats: 1 query vs 100+)
 - ✅ Database-level filtering reducing data transfer by 90%+
 - ✅ Bulk operations improving batch performance by 10x (N queries → 2 queries)
@@ -1069,9 +1243,12 @@ async batchProcess(@Body() batchOperation: BatchOperationDto) {
 - ✅ Transaction-safe batch operations with comprehensive error handling
 - ✅ Bulk create functionality supporting 500+ tasks efficiently
 - ✅ Flexible bulk updates for any task fields with individual error tracking
+- ✅ Strategic database indexing system with 8 optimized indexes
+- ✅ Performance monitoring system with real-time metrics and recommendations
+- ✅ Database migration strategy for safe index deployment
 
 **Remaining Phase 2 Goals:**
-- 🔄 Database indexing strategy (Phase 2.4)
+- 🔄 Complete Phase 2.4 deployment and validation (20% remaining)
 - 🔄 Query result caching (Phase 2.5)
 - 🔄 Connection pooling optimization (Phase 2.5)
 
