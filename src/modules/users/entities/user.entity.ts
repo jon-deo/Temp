@@ -1,5 +1,6 @@
 import { Column, CreateDateColumn, Entity, OneToMany, PrimaryGeneratedColumn, UpdateDateColumn } from 'typeorm';
 import { Task } from '../../tasks/entities/task.entity';
+import { RefreshToken } from '../../auth/entities/refresh-token.entity';
 import { Exclude } from 'class-transformer';
 
 @Entity('users')
@@ -22,6 +23,9 @@ export class User {
 
   @OneToMany(() => Task, (task) => task.user)
   tasks: Task[];
+
+  @OneToMany(() => RefreshToken, (refreshToken) => refreshToken.user)
+  refreshTokens: RefreshToken[];
 
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;
