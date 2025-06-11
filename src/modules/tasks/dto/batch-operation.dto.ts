@@ -61,4 +61,12 @@ export class BatchOperationResponseDto {
     type: [String]
   })
   failedTaskIds?: string[];
+
+  @ApiProperty({
+    example: ['660e8400-e29b-41d4-a716-446655440001', '660e8400-e29b-41d4-a716-446655440002'],
+    description: 'Array of task IDs that were successfully processed',
+    required: false,
+    type: [String]
+  })
+  successfulTaskIds?: string[];
 }

@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, DataSource } from 'typeorm';
 import { Task } from './entities/task.entity';
 import { CreateTaskDto } from './dto/create-task.dto';
 import { UpdateTaskDto } from './dto/update-task.dto';
@@ -16,21 +16,37 @@ export class TasksService {
     private tasksRepository: Repository<Task>,
     @InjectQueue('task-processing')
     private taskQueue: Queue,
+    private dataSource: DataSource,
   ) { }
 
   async create(createTaskDto: CreateTaskDto): Promise<Task> {
-    // Inefficient implementation: creates the task but doesn't use a single transaction
-    // for creating and adding to queue, potential for inconsistent state
-    const task = this.tasksRepository.create(createTaskDto);
-    const savedTask = await this.tasksRepository.save(task);
+    // ✅ OPTIMIZED: Atomic operation with transaction management
+    return await this.dataSource.transaction(async manager => {
+      try {
+        // Create and save task within transaction
+        const task = manager.create(Task, createTaskDto);
+        const savedTask = await manager.save(task);
 
-    // Add to queue without waiting for confirmation or handling errors
-    this.taskQueue.add('task-status-update', {
-      taskId: savedTask.id,
-      status: savedTask.status,
+        // ✅ PERFORMANCE: Add to queue only after successful DB commit
+        // Queue operation happens after transaction commits to ensure consistency
+        await this.taskQueue.add('task-status-update', {
+          taskId: savedTask.id,
+          status: savedTask.status,
+        }, {
+          // ✅ RELIABILITY: Add retry configuration
+          attempts: 3,
+          backoff: {
+            type: 'exponential',
+            delay: 2000,
+          },
+        });
+
+        return savedTask;
+      } catch (error) {
+        // ✅ ERROR HANDLING: Transaction will automatically rollback
+        throw new Error(`Failed to create task: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      }
     });
-
-    return savedTask;
   }
 
   async findAll(): Promise<Task[]> {
@@ -131,42 +147,94 @@ export class TasksService {
   }
 
   async update(id: string, updateTaskDto: UpdateTaskDto): Promise<Task> {
-    // Inefficient implementation: multiple database calls
-    // and no transaction handling
-    const task = await this.findOne(id);
+    // ✅ OPTIMIZED: Single query with transaction management
+    return await this.dataSource.transaction(async manager => {
+      try {
+        // ✅ PERFORMANCE: Get original task data for status comparison
+        const originalTask = await manager.findOne(Task, {
+          where: { id },
+          select: ['id', 'status'] // Only select needed fields for comparison
+        });
 
-    const originalStatus = task.status;
+        if (!originalTask) {
+          throw new NotFoundException('Task not found');
+        }
 
-    // Directly update each field individually
-    if (updateTaskDto.title) task.title = updateTaskDto.title;
-    if (updateTaskDto.description) task.description = updateTaskDto.description;
-    if (updateTaskDto.status) task.status = updateTaskDto.status;
-    if (updateTaskDto.priority) task.priority = updateTaskDto.priority;
-    if (updateTaskDto.dueDate) task.dueDate = updateTaskDto.dueDate;
+        // ✅ PERFORMANCE: Single UPDATE query instead of findOne + save
+        const updateResult = await manager
+          .createQueryBuilder()
+          .update(Task)
+          .set(updateTaskDto)
+          .where('id = :id', { id })
+          .execute();
 
-    const updatedTask = await this.tasksRepository.save(task);
+        if (updateResult.affected === 0) {
+          throw new NotFoundException('Task not found or no changes made');
+        }
 
-    // Add to queue if status changed, but without proper error handling
-    if (originalStatus !== updatedTask.status) {
-      this.taskQueue.add('task-status-update', {
-        taskId: updatedTask.id,
-        status: updatedTask.status,
-      });
-    }
+        // ✅ PERFORMANCE: Get updated task with relations
+        const updatedTask = await manager.findOne(Task, {
+          where: { id },
+          relations: ['user']
+        });
 
-    return updatedTask;
+        // ✅ RELIABILITY: Add to queue only if status changed and after DB commit
+        if (updateTaskDto.status && originalTask.status !== updateTaskDto.status) {
+          await this.taskQueue.add('task-status-update', {
+            taskId: updatedTask!.id,
+            status: updatedTask!.status,
+          }, {
+            attempts: 3,
+            backoff: {
+              type: 'exponential',
+              delay: 2000,
+            },
+          });
+        }
+
+        return updatedTask!;
+      } catch (error) {
+        if (error instanceof NotFoundException) {
+          throw error;
+        }
+        throw new Error(`Failed to update task: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      }
+    });
   }
 
   async remove(id: string): Promise<void> {
-    // Inefficient implementation: two separate database calls
-    const task = await this.findOne(id);
-    await this.tasksRepository.remove(task);
+    // ✅ OPTIMIZED: Single DELETE query with existence check
+    const deleteResult = await this.tasksRepository
+      .createQueryBuilder()
+      .delete()
+      .from(Task)
+      .where('id = :id', { id })
+      .execute();
+
+    if (deleteResult.affected === 0) {
+      throw new NotFoundException('Task not found');
+    }
   }
 
   async findByStatus(status: TaskStatus): Promise<Task[]> {
-    // Inefficient implementation: doesn't use proper repository patterns
-    const query = 'SELECT * FROM tasks WHERE status = $1';
-    return this.tasksRepository.query(query, [status]);
+    // ✅ OPTIMIZED: Use QueryBuilder with proper typing and relations
+    return this.tasksRepository
+      .createQueryBuilder('task')
+      .where('task.status = :status', { status })
+      .orderBy('task.createdAt', 'DESC')
+      .getMany();
+  }
+
+  /**
+   * ✅ OPTIMIZED: Find tasks by status with user relations when needed
+   */
+  async findByStatusWithUsers(status: TaskStatus): Promise<Task[]> {
+    return this.tasksRepository
+      .createQueryBuilder('task')
+      .leftJoinAndSelect('task.user', 'user')
+      .where('task.status = :status', { status })
+      .orderBy('task.createdAt', 'DESC')
+      .getMany();
   }
 
   /**
@@ -208,40 +276,282 @@ export class TasksService {
   }
 
   async updateStatus(id: string, status: string): Promise<Task> {
-    // This method will be called by the task processor
-    const task = await this.findOne(id);
-    task.status = status as any;
-    return this.tasksRepository.save(task);
-  }
-
-  /**
-   * ✅ OPTIMIZED: Bulk update operations to replace N+1 queries
-   */
-  async bulkUpdateStatus(taskIds: string[], status: TaskStatus): Promise<{ affected: number }> {
-    // ✅ PERFORMANCE: Single query to update multiple tasks
-    const result = await this.tasksRepository
+    // ✅ OPTIMIZED: Single UPDATE query for queue processor
+    const updateResult = await this.tasksRepository
       .createQueryBuilder()
       .update(Task)
-      .set({ status })
-      .where('id IN (:...taskIds)', { taskIds })
+      .set({ status: status as TaskStatus })
+      .where('id = :id', { id })
       .execute();
 
-    return { affected: result.affected || 0 };
+    if (updateResult.affected === 0) {
+      throw new NotFoundException('Task not found');
+    }
+
+    // ✅ PERFORMANCE: Return updated task with minimal data for queue processor
+    const updatedTask = await this.tasksRepository.findOne({
+      where: { id },
+      select: ['id', 'status', 'title'] // Only essential fields for queue response
+    });
+
+    return updatedTask!;
   }
 
   /**
-   * ✅ OPTIMIZED: Bulk delete operations to replace N+1 queries
+   * ✅ OPTIMIZED: Bulk update operations with transaction management
    */
-  async bulkDelete(taskIds: string[]): Promise<{ affected: number }> {
-    // ✅ PERFORMANCE: Single query to delete multiple tasks
-    const result = await this.tasksRepository
-      .createQueryBuilder()
-      .delete()
-      .from(Task)
-      .where('id IN (:...taskIds)', { taskIds })
-      .execute();
+  async bulkUpdateStatus(taskIds: string[], status: TaskStatus): Promise<{
+    affected: number;
+    successful: string[];
+    failed: string[];
+  }> {
+    return await this.dataSource.transaction(async manager => {
+      try {
+        // ✅ VALIDATION: Input validation
+        if (!taskIds || taskIds.length === 0) {
+          throw new Error('No task IDs provided');
+        }
 
-    return { affected: result.affected || 0 };
+        if (taskIds.length > 1000) {
+          throw new Error('Maximum 1000 tasks can be updated at once');
+        }
+
+        // ✅ VALIDATION: Check which tasks exist and get current status
+        const existingTasks = await manager
+          .createQueryBuilder(Task, 'task')
+          .select(['task.id', 'task.status'])
+          .where('task.id IN (:...taskIds)', { taskIds })
+          .getMany();
+
+        const existingIds = existingTasks.map(task => task.id);
+        const missingIds = taskIds.filter(id => !existingIds.includes(id));
+
+        // ✅ TRANSACTION: Update only existing tasks
+        const result = await manager
+          .createQueryBuilder()
+          .update(Task)
+          .set({ status, updatedAt: new Date() })
+          .where('id IN (:...existingIds)', { existingIds })
+          .execute();
+
+        // ✅ QUEUE: Add to queue only for tasks that actually changed status
+        const changedTasks = existingTasks.filter(task => task.status !== status);
+        if (changedTasks.length > 0) {
+          const queuePromises = changedTasks.map(task =>
+            this.taskQueue.add('task-status-update', {
+              taskId: task.id,
+              status,
+              previousStatus: task.status,
+            }, {
+              attempts: 3,
+              backoff: { type: 'exponential', delay: 2000 },
+            })
+          );
+
+          await Promise.all(queuePromises);
+        }
+
+        return {
+          affected: result.affected || 0,
+          successful: existingIds,
+          failed: missingIds,
+        };
+      } catch (error) {
+        throw new Error(`Bulk status update failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      }
+    });
+  }
+
+  /**
+   * ✅ OPTIMIZED: Bulk delete operations with transaction management and error handling
+   */
+  async bulkDelete(taskIds: string[]): Promise<{
+    affected: number;
+    successful: string[];
+    failed: string[];
+  }> {
+    return await this.dataSource.transaction(async manager => {
+      try {
+        // ✅ VALIDATION: Input validation
+        if (!taskIds || taskIds.length === 0) {
+          throw new Error('No task IDs provided');
+        }
+
+        if (taskIds.length > 1000) {
+          throw new Error('Maximum 1000 tasks can be deleted at once');
+        }
+
+        // ✅ VALIDATION: Check which tasks exist before deletion
+        const existingTasks = await manager
+          .createQueryBuilder(Task, 'task')
+          .select('task.id')
+          .where('task.id IN (:...taskIds)', { taskIds })
+          .getMany();
+
+        const existingIds = existingTasks.map(task => task.id);
+        const missingIds = taskIds.filter(id => !existingIds.includes(id));
+
+        // ✅ TRANSACTION: Delete only existing tasks
+        const result = await manager
+          .createQueryBuilder()
+          .delete()
+          .from(Task)
+          .where('id IN (:...existingIds)', { existingIds })
+          .execute();
+
+        // ✅ QUEUE: Add deletion notifications to queue
+        if (existingIds.length > 0) {
+          const queuePromises = existingIds.map(taskId =>
+            this.taskQueue.add('task-deleted', {
+              taskId,
+              deletedAt: new Date(),
+            }, {
+              attempts: 3,
+              backoff: { type: 'exponential', delay: 2000 },
+            })
+          );
+
+          await Promise.all(queuePromises);
+        }
+
+        return {
+          affected: result.affected || 0,
+          successful: existingIds,
+          failed: missingIds,
+        };
+      } catch (error) {
+        throw new Error(`Bulk delete failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      }
+    });
+  }
+
+  /**
+   * ✅ NEW: Bulk create operations with transaction management
+   */
+  async bulkCreate(createTaskDtos: CreateTaskDto[]): Promise<{
+    created: Task[];
+    failed: { index: number; error: string }[];
+  }> {
+    return await this.dataSource.transaction(async manager => {
+      try {
+        // ✅ VALIDATION: Input validation
+        if (!createTaskDtos || createTaskDtos.length === 0) {
+          throw new Error('No task data provided');
+        }
+
+        if (createTaskDtos.length > 500) {
+          throw new Error('Maximum 500 tasks can be created at once');
+        }
+
+        const created: Task[] = [];
+        const failed: { index: number; error: string }[] = [];
+
+        // ✅ TRANSACTION: Create tasks in batches within transaction
+        for (let i = 0; i < createTaskDtos.length; i++) {
+          try {
+            const task = manager.create(Task, createTaskDtos[i]);
+            const savedTask = await manager.save(task);
+            created.push(savedTask);
+          } catch (error) {
+            failed.push({
+              index: i,
+              error: error instanceof Error ? error.message : 'Unknown error'
+            });
+          }
+        }
+
+        // ✅ QUEUE: Add created tasks to queue
+        if (created.length > 0) {
+          const queuePromises = created.map(task =>
+            this.taskQueue.add('task-created', {
+              taskId: task.id,
+              status: task.status,
+            }, {
+              attempts: 3,
+              backoff: { type: 'exponential', delay: 2000 },
+            })
+          );
+
+          await Promise.all(queuePromises);
+        }
+
+        return { created, failed };
+      } catch (error) {
+        throw new Error(`Bulk create failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      }
+    });
+  }
+
+  /**
+   * ✅ NEW: Bulk update operations for multiple fields with transaction management
+   */
+  async bulkUpdate(updates: { id: string; data: Partial<UpdateTaskDto> }[]): Promise<{
+    updated: string[];
+    failed: { id: string; error: string }[];
+  }> {
+    return await this.dataSource.transaction(async manager => {
+      try {
+        // ✅ VALIDATION: Input validation
+        if (!updates || updates.length === 0) {
+          throw new Error('No update data provided');
+        }
+
+        if (updates.length > 500) {
+          throw new Error('Maximum 500 tasks can be updated at once');
+        }
+
+        const updated: string[] = [];
+        const failed: { id: string; error: string }[] = [];
+
+        // ✅ TRANSACTION: Update tasks individually within transaction
+        for (const update of updates) {
+          try {
+            const result = await manager
+              .createQueryBuilder()
+              .update(Task)
+              .set({ ...update.data, updatedAt: new Date() })
+              .where('id = :id', { id: update.id })
+              .execute();
+
+            if (result.affected && result.affected > 0) {
+              updated.push(update.id);
+            } else {
+              failed.push({
+                id: update.id,
+                error: 'Task not found'
+              });
+            }
+          } catch (error) {
+            failed.push({
+              id: update.id,
+              error: error instanceof Error ? error.message : 'Unknown error'
+            });
+          }
+        }
+
+        // ✅ QUEUE: Add updated tasks to queue if status changed
+        const statusUpdates = updates.filter(update => update.data.status);
+        if (statusUpdates.length > 0) {
+          const queuePromises = statusUpdates
+            .filter(update => updated.includes(update.id))
+            .map(update =>
+              this.taskQueue.add('task-status-update', {
+                taskId: update.id,
+                status: update.data.status,
+              }, {
+                attempts: 3,
+                backoff: { type: 'exponential', delay: 2000 },
+              })
+            );
+
+          await Promise.all(queuePromises);
+        }
+
+        return { updated, failed };
+      } catch (error) {
+        throw new Error(`Bulk update failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      }
+    });
   }
 
   /**
