@@ -2,12 +2,10 @@ import { Controller, Get, Post, Body, Patch, Param, Delete, UseGuards, Query, Ht
 import { TasksService } from './tasks.service';
 import { CreateTaskDto } from './dto/create-task.dto';
 import { UpdateTaskDto } from './dto/update-task.dto';
-import { ApiBearerAuth, ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
-import { Task } from './entities/task.entity';
+import { BatchOperationDto, BatchOperationResponseDto, BatchAction } from './dto/batch-operation.dto';
+import { TaskFilterDto, PaginatedTaskResponseDto } from './dto/task-filter.dto';
+import { ApiBearerAuth, ApiOperation, ApiTags, ApiResponse } from '@nestjs/swagger';
 import { TaskStatus } from './enums/task-status.enum';
-import { TaskPriority } from './enums/task-priority.enum';
 import { RateLimitGuard } from '../../common/guards/rate-limit.guard';
 import { RateLimit } from '../../common/decorators/rate-limit.decorator';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
@@ -20,9 +18,7 @@ import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 export class TasksController {
   constructor(
     private readonly tasksService: TasksService,
-    // Anti-pattern: Controller directly accessing repository
-    @InjectRepository(Task)
-    private taskRepository: Repository<Task>
+    // ✅ OPTIMIZED: Removed direct repository access, using service layer properly
   ) { }
 
   @Post()
@@ -32,64 +28,22 @@ export class TasksController {
   }
 
   @Get()
-  @ApiOperation({ summary: 'Find all tasks with optional filtering' })
-  @ApiQuery({ name: 'status', required: false })
-  @ApiQuery({ name: 'priority', required: false })
-  @ApiQuery({ name: 'page', required: false })
-  @ApiQuery({ name: 'limit', required: false })
-  async findAll(
-    @Query('status') status?: string,
-    @Query('priority') priority?: string,
-    @Query('page') page?: number,
-    @Query('limit') limit?: number,
-  ) {
-    // Inefficient approach: Inconsistent pagination handling
-    if (page && !limit) {
-      limit = 10; // Default limit
-    }
-
-    // Inefficient processing: Manual filtering instead of using repository
-    let tasks = await this.tasksService.findAll();
-
-    // Inefficient filtering: In-memory filtering instead of database filtering
-    if (status) {
-      tasks = tasks.filter(task => task.status === status as TaskStatus);
-    }
-
-    if (priority) {
-      tasks = tasks.filter(task => task.priority === priority as TaskPriority);
-    }
-
-    // Inefficient pagination: In-memory pagination
-    if (page && limit) {
-      const startIndex = (page - 1) * limit;
-      const endIndex = page * limit;
-      tasks = tasks.slice(startIndex, endIndex);
-    }
-
-    return {
-      data: tasks,
-      count: tasks.length,
-      // Missing metadata for proper pagination
-    };
+  @ApiOperation({ summary: 'Find all tasks with optional filtering and pagination' })
+  @ApiResponse({
+    status: 200,
+    description: 'Tasks retrieved successfully with pagination',
+    type: PaginatedTaskResponseDto
+  })
+  async findAll(@Query() filters: TaskFilterDto): Promise<PaginatedTaskResponseDto> {
+    // ✅ OPTIMIZED: Database-level filtering and pagination instead of memory operations
+    return this.tasksService.findAllWithFilters(filters);
   }
 
   @Get('stats')
   @ApiOperation({ summary: 'Get task statistics' })
   async getStats() {
-    // Inefficient approach: N+1 query problem
-    const tasks = await this.taskRepository.find();
-
-    // Inefficient computation: Should be done with SQL aggregation
-    const statistics = {
-      total: tasks.length,
-      completed: tasks.filter(t => t.status === TaskStatus.COMPLETED).length,
-      inProgress: tasks.filter(t => t.status === TaskStatus.IN_PROGRESS).length,
-      pending: tasks.filter(t => t.status === TaskStatus.PENDING).length,
-      highPriority: tasks.filter(t => t.priority === TaskPriority.HIGH).length,
-    };
-
-    return statistics;
+    // ✅ OPTIMIZED: Use SQL aggregation instead of loading all tasks into memory
+    return this.tasksService.getTaskStatistics();
   }
 
   @Get(':id')
@@ -122,38 +76,58 @@ export class TasksController {
 
   @Post('batch')
   @ApiOperation({ summary: 'Batch process multiple tasks' })
-  async batchProcess(@Body() operations: { tasks: string[], action: string }) {
-    // Inefficient batch processing: Sequential processing instead of bulk operations
-    const { tasks: taskIds, action } = operations;
-    const results = [];
+  @ApiResponse({
+    status: 200,
+    description: 'Batch operation completed successfully',
+    type: BatchOperationResponseDto
+  })
+  @ApiResponse({
+    status: 400,
+    description: 'Invalid input or validation error'
+  })
+  async batchProcess(@Body() batchOperation: BatchOperationDto): Promise<BatchOperationResponseDto> {
+    const { tasks: taskIds, action } = batchOperation;
 
-    // N+1 query problem: Processing tasks one by one
-    for (const taskId of taskIds) {
-      try {
-        let result;
+    try {
+      // ✅ OPTIMIZED: Validate all tasks exist in a single query
+      const { existing, missing } = await this.tasksService.validateTasksExist(taskIds);
 
-        switch (action) {
-          case 'complete':
-            result = await this.tasksService.update(taskId, { status: TaskStatus.COMPLETED });
-            break;
-          case 'delete':
-            result = await this.tasksService.remove(taskId);
-            break;
-          default:
-            throw new HttpException(`Unknown action: ${action}`, HttpStatus.BAD_REQUEST);
-        }
-
-        results.push({ taskId, success: true, result });
-      } catch (error) {
-        // Inconsistent error handling
-        results.push({
-          taskId,
+      if (missing.length > 0) {
+        return {
           success: false,
-          error: error instanceof Error ? error.message : 'Unknown error'
-        });
+          message: `Tasks not found: ${missing.join(', ')}`,
+          processed: 0,
+          failed: missing.length,
+          failedTaskIds: missing
+        };
       }
-    }
 
-    return results;
+      // ✅ OPTIMIZED: Use bulk operations instead of N+1 queries
+      let result;
+      switch (action) {
+        case BatchAction.COMPLETE:
+          result = await this.tasksService.bulkUpdateStatus(existing, TaskStatus.COMPLETED);
+          break;
+        case BatchAction.DELETE:
+          result = await this.tasksService.bulkDelete(existing);
+          break;
+        default:
+          throw new HttpException(`Unknown action: ${action}`, HttpStatus.BAD_REQUEST);
+      }
+
+      return {
+        success: true,
+        message: `Successfully ${action}d ${result.affected} tasks`,
+        processed: result.affected,
+        failed: 0
+      };
+
+    } catch (error) {
+      // ✅ IMPROVED: Consistent error handling
+      throw new HttpException(
+        `Batch operation failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        HttpStatus.INTERNAL_SERVER_ERROR
+      );
+    }
   }
 } 
