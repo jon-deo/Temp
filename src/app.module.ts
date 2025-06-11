@@ -1,10 +1,10 @@
-import { Module } from '@nestjs/common';
+import { Module, MiddlewareConsumer, NestModule, ValidationPipe } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { BullModule } from '@nestjs/bullmq';
 import { ThrottlerModule } from '@nestjs/throttler';
 import { ScheduleModule } from '@nestjs/schedule';
-import { APP_FILTER } from '@nestjs/core';
+import { APP_FILTER, APP_PIPE } from '@nestjs/core';
 import { UsersModule } from './modules/users/users.module';
 import { TasksModule } from './modules/tasks/tasks.module';
 import { AuthModule } from './modules/auth/auth.module';
@@ -13,6 +13,7 @@ import { ScheduledTasksModule } from './queues/scheduled-tasks/scheduled-tasks.m
 import { CommonModule } from './common/common.module';
 import { GlobalExceptionFilter } from './common/filters/global-exception.filter';
 import { ErrorSanitizationService } from './common/services/error-sanitization.service';
+import { RequestSizeLimitMiddleware } from './common/middleware/request-size-limit.middleware';
 import jwtConfig from './config/jwt.config';
 
 @Module({
@@ -88,9 +89,28 @@ import jwtConfig from './config/jwt.config';
       },
       inject: [ErrorSanitizationService],
     },
+    // Global validation pipe with enhanced security options
+    {
+      provide: APP_PIPE,
+      useValue: new ValidationPipe({
+        whitelist: true,           // Strip properties that don't have decorators
+        forbidNonWhitelisted: true, // Throw error if non-whitelisted properties exist
+        transform: true,           // Automatically transform payloads to DTO instances
+        disableErrorMessages: false, // Keep error messages for development
+        validateCustomDecorators: true, // Validate our custom decorators
+        forbidUnknownValues: true, // Forbid unknown objects
+        stopAtFirstError: false,   // Validate all properties
+      }),
+    },
   ],
   exports: [
     // Common services are exported by CommonModule
   ]
 })
-export class AppModule { } 
+export class AppModule implements NestModule {
+  configure(consumer: MiddlewareConsumer) {
+    consumer
+      .apply(RequestSizeLimitMiddleware)
+      .forRoutes('*'); // Apply to all routes
+  }
+}

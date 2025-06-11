@@ -1,17 +1,30 @@
-import { IsDateString, IsEnum, IsNotEmpty, IsOptional, IsString, IsUUID } from 'class-validator';
+import { IsDateString, IsEnum, IsNotEmpty, IsOptional, IsString, IsUUID, MaxLength, MinLength } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 import { TaskStatus } from '../enums/task-status.enum';
 import { TaskPriority } from '../enums/task-priority.enum';
+import { IsSafeText } from '../../../common/decorators/validation.decorators';
 
 export class CreateTaskDto {
-  @ApiProperty({ example: 'Complete project documentation' })
+  @ApiProperty({
+    example: 'Complete project documentation',
+    description: 'Task title (3-200 characters, no HTML/scripts)'
+  })
   @IsString()
   @IsNotEmpty()
+  @MinLength(3)
+  @MaxLength(200)
+  @IsSafeText()
   title: string;
 
-  @ApiProperty({ example: 'Add details about API endpoints and data models', required: false })
+  @ApiProperty({
+    example: 'Add details about API endpoints and data models',
+    required: false,
+    description: 'Task description (max 2000 characters, no HTML/scripts)'
+  })
   @IsString()
   @IsOptional()
+  @MaxLength(2000)
+  @IsSafeText()
   description?: string;
 
   @ApiProperty({ enum: TaskStatus, example: TaskStatus.PENDING, required: false })
