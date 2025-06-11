@@ -323,6 +323,99 @@ async logout(@Body() refreshTokenDto: RefreshTokenDto): Promise<void> {
 - ✅ **Monitoring**: IP address and usage tracking for security
 - ✅ **Revocation**: Single token or all user tokens revocation
 
+### 1.6 Secure Error Handling and Data Exposure ✅
+
+**Issue**: Error messages exposed sensitive internal information to potential attackers
+
+**Problems Found**:
+- Database details exposed in error messages (`Task with ID ${id} not found in the database`)
+- Stack traces revealing file paths, technology stack, and internal structure
+- ID enumeration attacks possible through detailed error messages
+- Technology fingerprinting through error details (TypeORM, NestJS, PostgreSQL)
+- No consistent error response format
+
+**Solution** - Implemented Comprehensive Error Sanitization System:
+
+**New Error Sanitization Service** (`src/common/services/error-sanitization.service.ts`):
+```typescript
+// ✅ SECURE: Removes 20+ sensitive patterns
+private readonly sensitivePatterns = [
+  /database/gi,           // Removes database references
+  /sql/gi,               // Removes SQL-related terms
+  /typeorm/gi,           // Removes ORM references
+  /src\/[^\\s]*/g,       // Removes source code paths
+  /password[=:][^\\s]*/gi, // Removes password leaks
+];
+
+// ✅ SECURE: Generic messages by error type
+private readonly genericMessages = {
+  validation: 'Invalid input provided',
+  notFound: 'Resource not found',
+  unauthorized: 'Authentication required',
+  forbidden: 'Access denied',
+  internal: 'An internal error occurred',
+};
+```
+
+**New Global Exception Filter** (`src/common/filters/global-exception.filter.ts`):
+```typescript
+// ✅ SECURE: Database errors never reach client
+private sanitizeDatabaseError(error: QueryFailedError): any {
+  // Log detailed error server-side only
+  this.logger.error('Database error occurred', {
+    message: error.message,
+    query: error.query,        // ✅ LOGGED SERVER-SIDE ONLY
+  });
+
+  // Return generic error for client
+  return {
+    message: 'A database operation failed', // ✅ SAFE FOR CLIENT
+    name: 'DatabaseError',
+  };
+}
+
+// ✅ SECURE: Adds security headers to all error responses
+private setSecurityHeaders(response: Response): void {
+  response.removeHeader('X-Powered-By');           // Hide server info
+  response.setHeader('X-Content-Type-Options', 'nosniff');
+  response.setHeader('X-Frame-Options', 'DENY');
+  response.setHeader('X-XSS-Protection', '1; mode=block');
+}
+```
+
+**Updated Error Messages Throughout Application**:
+```typescript
+// BEFORE - DANGEROUS
+throw new NotFoundException(`Task with ID ${id} not found in the database`);
+throw new NotFoundException(`User with ID ${id} not found`);
+
+// AFTER - SECURE
+throw new NotFoundException('Task not found');
+throw new NotFoundException('User not found');
+```
+
+**Standardized Error Response Format**:
+```typescript
+// ✅ SECURE: Consistent, safe error format
+interface SanitizedError {
+  statusCode: number;        // HTTP status
+  message: string;           // Safe, generic message
+  error: string;             // Safe error type name
+  timestamp: string;         // When error occurred
+  path: string;              // Sanitized request path (no IDs)
+}
+```
+
+**Changes Made**:
+- ✅ **Information Disclosure**: Eliminated all sensitive data from error responses
+- ✅ **ID Enumeration**: Prevented ID enumeration attacks with generic messages
+- ✅ **Stack Trace Protection**: No internal details exposed to clients
+- ✅ **Technology Hiding**: Complete technology stack fingerprinting prevention
+- ✅ **Consistent Format**: Standardized error response structure
+- ✅ **Environment Aware**: Different behavior for development vs production
+- ✅ **Security Headers**: Added protective HTTP headers to error responses
+- ✅ **Comprehensive Logging**: Full debugging details preserved server-side only
+
 ## Previously Fixed Issues
 
 ### Infrastructure Fixes ✅
@@ -334,7 +427,7 @@ async logout(@Body() refreshTokenDto: RefreshTokenDto): Promise<void> {
 ## Next Steps - Phase 1 Remaining
 - ✅ Implement refresh token mechanism
 - ✅ Fix rate limiting security issues
-- [ ] Secure error handling and data exposure
+- ✅ Secure error handling and data exposure
 - [ ] Add input validation and sanitization
 
 ## Next Steps - Phase 2 (Performance)

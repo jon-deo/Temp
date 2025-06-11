@@ -15,7 +15,7 @@ export class TasksService {
     private tasksRepository: Repository<Task>,
     @InjectQueue('task-processing')
     private taskQueue: Queue,
-  ) {}
+  ) { }
 
   async create(createTaskDto: CreateTaskDto): Promise<Task> {
     // Inefficient implementation: creates the task but doesn't use a single transaction
@@ -45,7 +45,7 @@ export class TasksService {
     const count = await this.tasksRepository.count({ where: { id } });
 
     if (count === 0) {
-      throw new NotFoundException(`Task with ID ${id} not found`);
+      throw new NotFoundException('Task not found');
     }
 
     return (await this.tasksRepository.findOne({

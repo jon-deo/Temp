@@ -4,12 +4,15 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { BullModule } from '@nestjs/bullmq';
 import { ThrottlerModule } from '@nestjs/throttler';
 import { ScheduleModule } from '@nestjs/schedule';
+import { APP_FILTER } from '@nestjs/core';
 import { UsersModule } from './modules/users/users.module';
 import { TasksModule } from './modules/tasks/tasks.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { TaskProcessorModule } from './queues/task-processor/task-processor.module';
 import { ScheduledTasksModule } from './queues/scheduled-tasks/scheduled-tasks.module';
 import { CommonModule } from './common/common.module';
+import { GlobalExceptionFilter } from './common/filters/global-exception.filter';
+import { ErrorSanitizationService } from './common/services/error-sanitization.service';
 import jwtConfig from './config/jwt.config';
 
 @Module({
@@ -77,7 +80,14 @@ import jwtConfig from './config/jwt.config';
     ScheduledTasksModule,
   ],
   providers: [
-    // Common services are now provided by CommonModule
+    // Global exception filter for secure error handling
+    {
+      provide: APP_FILTER,
+      useFactory: (errorSanitizationService: ErrorSanitizationService) => {
+        return new GlobalExceptionFilter(errorSanitizationService);
+      },
+      inject: [ErrorSanitizationService],
+    },
   ],
   exports: [
     // Common services are exported by CommonModule
