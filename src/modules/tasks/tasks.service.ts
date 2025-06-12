@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException, ForbiddenException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource } from 'typeorm';
 import { Task } from './entities/task.entity';
@@ -19,12 +19,15 @@ export class TasksService {
     private dataSource: DataSource,
   ) { }
 
-  async create(createTaskDto: CreateTaskDto): Promise<Task> {
+  async create(createTaskDto: CreateTaskDto, userId: string): Promise<Task> {
+    // ✅ AUTHORIZATION: Ensure task is created for the authenticated user
+    const taskData = { ...createTaskDto, userId };
+
     // ✅ OPTIMIZED: Atomic operation with transaction management
     return await this.dataSource.transaction(async manager => {
       try {
         // Create and save task within transaction
-        const task = manager.create(Task, createTaskDto);
+        const task = manager.create(Task, taskData);
         const savedTask = await manager.save(task);
 
         // ✅ PERFORMANCE: Add to queue only after successful DB commit
@@ -71,6 +74,7 @@ export class TasksService {
   async findAllWithFilters(filters: {
     status?: string;
     priority?: string;
+    userId?: string;
     page?: number;
     limit?: number;
     sortBy?: string;
@@ -87,6 +91,7 @@ export class TasksService {
     const {
       status,
       priority,
+      userId,
       page = 1,
       limit = 10,
       sortBy = 'createdAt',
@@ -95,6 +100,11 @@ export class TasksService {
 
     // ✅ PERFORMANCE: Build query with database-level filtering
     const queryBuilder = this.tasksRepository.createQueryBuilder('task');
+
+    // ✅ AUTHORIZATION: Filter by userId if provided
+    if (userId) {
+      queryBuilder.andWhere('task.userId = :userId', { userId });
+    }
 
     // ✅ PERFORMANCE: Add filters at database level, not in memory
     if (status) {
@@ -132,10 +142,18 @@ export class TasksService {
     };
   }
 
-  async findOne(id: string): Promise<Task> {
+  async findOne(id: string, userId?: string, userRole?: string): Promise<Task> {
+    // ✅ AUTHORIZATION: Build query with ownership check
+    const whereCondition: any = { id };
+
+    // ✅ AUTHORIZATION: Non-admin users can only see their own tasks
+    if (userRole !== 'admin' && userId) {
+      whereCondition.userId = userId;
+    }
+
     // ✅ OPTIMIZED: Single database call instead of count + findOne
     const task = await this.tasksRepository.findOne({
-      where: { id },
+      where: whereCondition,
       relations: ['user'],
     });
 
@@ -146,14 +164,20 @@ export class TasksService {
     return task;
   }
 
-  async update(id: string, updateTaskDto: UpdateTaskDto): Promise<Task> {
+  async update(id: string, updateTaskDto: UpdateTaskDto, userId?: string, userRole?: string): Promise<Task> {
     // ✅ OPTIMIZED: Single query with transaction management
     return await this.dataSource.transaction(async manager => {
       try {
+        // ✅ AUTHORIZATION: Build where condition with ownership check
+        const whereCondition: any = { id };
+        if (userRole !== 'admin' && userId) {
+          whereCondition.userId = userId;
+        }
+
         // ✅ PERFORMANCE: Get original task data for status comparison
         const originalTask = await manager.findOne(Task, {
-          where: { id },
-          select: ['id', 'status'] // Only select needed fields for comparison
+          where: whereCondition,
+          select: ['id', 'status', 'userId'] // Include userId for authorization
         });
 
         if (!originalTask) {
@@ -202,7 +226,19 @@ export class TasksService {
     });
   }
 
-  async remove(id: string): Promise<void> {
+  async remove(id: string, userId?: string, userRole?: string): Promise<void> {
+    // ✅ AUTHORIZATION: Check ownership before deletion
+    if (userRole !== 'admin' && userId) {
+      const task = await this.tasksRepository.findOne({
+        where: { id, userId },
+        select: ['id']
+      });
+
+      if (!task) {
+        throw new NotFoundException('Task not found');
+      }
+    }
+
     // ✅ OPTIMIZED: Single DELETE query with existence check
     const deleteResult = await this.tasksRepository
       .createQueryBuilder()
@@ -241,7 +277,7 @@ export class TasksService {
    * ✅ OPTIMIZED: Get task statistics using SQL aggregation
    * Replaces N+1 query problem with single efficient query
    */
-  async getTaskStatistics(): Promise<{
+  async getTaskStatistics(userId?: string, userRole?: string): Promise<{
     total: number;
     completed: number;
     inProgress: number;
@@ -249,7 +285,7 @@ export class TasksService {
     highPriority: number;
   }> {
     // ✅ PERFORMANCE: Single SQL query with aggregation instead of loading all tasks
-    const result = await this.tasksRepository
+    const queryBuilder = this.tasksRepository
       .createQueryBuilder('task')
       .select([
         'COUNT(*) as total',
@@ -263,8 +299,14 @@ export class TasksService {
         inProgress: TaskStatus.IN_PROGRESS,
         pending: TaskStatus.PENDING,
         highPriority: TaskPriority.HIGH
-      })
-      .getRawOne();
+      });
+
+    // ✅ AUTHORIZATION: Filter by userId for non-admin users
+    if (userRole !== 'admin' && userId) {
+      queryBuilder.andWhere('task.userId = :userId', { userId });
+    }
+
+    const result = await queryBuilder.getRawOne();
 
     return {
       total: parseInt(result.total) || 0,
@@ -300,7 +342,7 @@ export class TasksService {
   /**
    * ✅ OPTIMIZED: Bulk update operations with transaction management
    */
-  async bulkUpdateStatus(taskIds: string[], status: TaskStatus): Promise<{
+  async bulkUpdateStatus(taskIds: string[], status: TaskStatus, userId?: string, userRole?: string): Promise<{
     affected: number;
     successful: string[];
     failed: string[];
@@ -316,12 +358,18 @@ export class TasksService {
           throw new Error('Maximum 1000 tasks can be updated at once');
         }
 
-        // ✅ VALIDATION: Check which tasks exist and get current status
-        const existingTasks = await manager
+        // ✅ VALIDATION: Check which tasks exist and get current status with authorization
+        const queryBuilder = manager
           .createQueryBuilder(Task, 'task')
           .select(['task.id', 'task.status'])
-          .where('task.id IN (:...taskIds)', { taskIds })
-          .getMany();
+          .where('task.id IN (:...taskIds)', { taskIds });
+
+        // ✅ AUTHORIZATION: Filter by userId for non-admin users
+        if (userRole !== 'admin' && userId) {
+          queryBuilder.andWhere('task.userId = :userId', { userId });
+        }
+
+        const existingTasks = await queryBuilder.getMany();
 
         const existingIds = existingTasks.map(task => task.id);
         const missingIds = taskIds.filter(id => !existingIds.includes(id));
@@ -365,7 +413,7 @@ export class TasksService {
   /**
    * ✅ OPTIMIZED: Bulk delete operations with transaction management and error handling
    */
-  async bulkDelete(taskIds: string[]): Promise<{
+  async bulkDelete(taskIds: string[], userId?: string, userRole?: string): Promise<{
     affected: number;
     successful: string[];
     failed: string[];
@@ -381,12 +429,18 @@ export class TasksService {
           throw new Error('Maximum 1000 tasks can be deleted at once');
         }
 
-        // ✅ VALIDATION: Check which tasks exist before deletion
-        const existingTasks = await manager
+        // ✅ VALIDATION: Check which tasks exist before deletion with authorization
+        const queryBuilder = manager
           .createQueryBuilder(Task, 'task')
           .select('task.id')
-          .where('task.id IN (:...taskIds)', { taskIds })
-          .getMany();
+          .where('task.id IN (:...taskIds)', { taskIds });
+
+        // ✅ AUTHORIZATION: Filter by userId for non-admin users
+        if (userRole !== 'admin' && userId) {
+          queryBuilder.andWhere('task.userId = :userId', { userId });
+        }
+
+        const existingTasks = await queryBuilder.getMany();
 
         const existingIds = existingTasks.map(task => task.id);
         const missingIds = taskIds.filter(id => !existingIds.includes(id));
@@ -485,7 +539,7 @@ export class TasksService {
   /**
    * ✅ NEW: Bulk update operations for multiple fields with transaction management
    */
-  async bulkUpdate(updates: { id: string; data: Partial<UpdateTaskDto> }[]): Promise<{
+  async bulkUpdate(updates: { id: string; data: Partial<UpdateTaskDto> }[], userId?: string, userRole?: string): Promise<{
     updated: string[];
     failed: { id: string; error: string }[];
   }> {
@@ -503,22 +557,28 @@ export class TasksService {
         const updated: string[] = [];
         const failed: { id: string; error: string }[] = [];
 
-        // ✅ TRANSACTION: Update tasks individually within transaction
+        // ✅ TRANSACTION: Update tasks individually within transaction with authorization
         for (const update of updates) {
           try {
-            const result = await manager
+            const updateBuilder = manager
               .createQueryBuilder()
               .update(Task)
               .set({ ...update.data, updatedAt: new Date() })
-              .where('id = :id', { id: update.id })
-              .execute();
+              .where('id = :id', { id: update.id });
+
+            // ✅ AUTHORIZATION: Add userId filter for non-admin users
+            if (userRole !== 'admin' && userId) {
+              updateBuilder.andWhere('userId = :userId', { userId });
+            }
+
+            const result = await updateBuilder.execute();
 
             if (result.affected && result.affected > 0) {
               updated.push(update.id);
             } else {
               failed.push({
                 id: update.id,
-                error: 'Task not found'
+                error: 'Task not found or access denied'
               });
             }
           } catch (error) {
@@ -555,15 +615,20 @@ export class TasksService {
   }
 
   /**
-   * ✅ OPTIMIZED: Validate task existence in bulk
+   * ✅ OPTIMIZED: Validate task existence in bulk with authorization
    */
-  async validateTasksExist(taskIds: string[]): Promise<{ existing: string[], missing: string[] }> {
-    const existingTasks = await this.tasksRepository
+  async validateTasksExist(taskIds: string[], userId?: string, userRole?: string): Promise<{ existing: string[], missing: string[] }> {
+    const queryBuilder = this.tasksRepository
       .createQueryBuilder('task')
       .select('task.id')
-      .where('task.id IN (:...taskIds)', { taskIds })
-      .getMany();
+      .where('task.id IN (:...taskIds)', { taskIds });
 
+    // ✅ AUTHORIZATION: Filter by userId for non-admin users
+    if (userRole !== 'admin' && userId) {
+      queryBuilder.andWhere('task.userId = :userId', { userId });
+    }
+
+    const existingTasks = await queryBuilder.getMany();
     const existingIds = existingTasks.map(task => task.id);
     const missingIds = taskIds.filter(id => !existingIds.includes(id));
 

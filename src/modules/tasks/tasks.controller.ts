@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Body, Patch, Param, Delete, UseGuards, Query, HttpException, HttpStatus } from '@nestjs/common';
+import { Controller, Get, Post, Body, Patch, Param, Delete, UseGuards, Query, HttpException, HttpStatus, ForbiddenException } from '@nestjs/common';
 import { TasksService } from './tasks.service';
 import { CreateTaskDto } from './dto/create-task.dto';
 import { UpdateTaskDto } from './dto/update-task.dto';
@@ -10,6 +10,7 @@ import { RateLimitGuard } from '../../common/guards/rate-limit.guard';
 import { RateLimit } from '../../common/decorators/rate-limit.decorator';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { QueryPerformanceService } from '../../common/services/query-performance.service';
+import { CurrentUser } from '../auth/decorators/current-user.decorator';
 
 @ApiTags('tasks')
 @Controller('tasks')
@@ -25,8 +26,13 @@ export class TasksController {
 
   @Post()
   @ApiOperation({ summary: 'Create a new task' })
-  create(@Body() createTaskDto: CreateTaskDto) {
-    return this.tasksService.create(createTaskDto);
+  create(@Body() createTaskDto: CreateTaskDto, @CurrentUser() user: any) {
+    // ✅ AUTHORIZATION: Only admin can assign tasks to others
+    if (createTaskDto.userId && user.role !== 'admin' && createTaskDto.userId !== user.id) {
+      throw new ForbiddenException('You can only create tasks for yourself');
+    }
+
+    return this.tasksService.create(createTaskDto, user.id);
   }
 
   @Get()
@@ -36,16 +42,19 @@ export class TasksController {
     description: 'Tasks retrieved successfully with pagination',
     type: PaginatedTaskResponseDto
   })
-  async findAll(@Query() filters: TaskFilterDto): Promise<PaginatedTaskResponseDto> {
+  async findAll(@Query() filters: TaskFilterDto, @CurrentUser() user: any): Promise<PaginatedTaskResponseDto> {
+    // ✅ AUTHORIZATION: Users can only see their own tasks, admins see all
+    const userFilters = user.role === 'admin' ? filters : { ...filters, userId: user.id };
+
     // ✅ OPTIMIZED: Database-level filtering and pagination instead of memory operations
-    return this.tasksService.findAllWithFilters(filters);
+    return this.tasksService.findAllWithFilters(userFilters);
   }
 
   @Get('stats')
   @ApiOperation({ summary: 'Get task statistics' })
-  async getStats() {
-    // ✅ OPTIMIZED: Use SQL aggregation instead of loading all tasks into memory
-    return this.tasksService.getTaskStatistics();
+  async getStats(@CurrentUser() user: any) {
+    // ✅ AUTHORIZATION: Users see stats for their tasks only, admins see all
+    return this.tasksService.getTaskStatistics(user.id, user.role);
   }
 
   @Get('performance')
@@ -88,27 +97,27 @@ export class TasksController {
 
   @Get(':id')
   @ApiOperation({ summary: 'Find a task by ID' })
-  async findOne(@Param('id') id: string) {
-    // ✅ OPTIMIZED: Service handles error throwing, no redundant check needed
-    return this.tasksService.findOne(id);
+  async findOne(@Param('id') id: string, @CurrentUser() user: any) {
+    // ✅ AUTHORIZATION: Check ownership at service level
+    return this.tasksService.findOne(id, user.id, user.role);
   }
 
   @Patch(':id')
   @ApiOperation({ summary: 'Update a task' })
   @ApiResponse({ status: 200, description: 'Task updated successfully' })
   @ApiResponse({ status: 404, description: 'Task not found' })
-  async update(@Param('id') id: string, @Body() updateTaskDto: UpdateTaskDto) {
-    // ✅ OPTIMIZED: Service handles validation and error throwing
-    return this.tasksService.update(id, updateTaskDto);
+  async update(@Param('id') id: string, @Body() updateTaskDto: UpdateTaskDto, @CurrentUser() user: any) {
+    // ✅ AUTHORIZATION: Check ownership at service level
+    return this.tasksService.update(id, updateTaskDto, user.id, user.role);
   }
 
   @Delete(':id')
   @ApiOperation({ summary: 'Delete a task' })
   @ApiResponse({ status: 204, description: 'Task deleted successfully' })
   @ApiResponse({ status: 404, description: 'Task not found' })
-  async remove(@Param('id') id: string) {
-    // ✅ OPTIMIZED: Service handles validation and error throwing
-    await this.tasksService.remove(id);
+  async remove(@Param('id') id: string, @CurrentUser() user: any) {
+    // ✅ AUTHORIZATION: Check ownership at service level
+    await this.tasksService.remove(id, user.id, user.role);
     // Return 204 No Content for successful deletion
     return;
   }
@@ -124,17 +133,17 @@ export class TasksController {
     status: 400,
     description: 'Invalid input or validation error'
   })
-  async batchProcess(@Body() batchOperation: BatchOperationDto): Promise<BatchOperationResponseDto> {
+  async batchProcess(@Body() batchOperation: BatchOperationDto, @CurrentUser() user: any): Promise<BatchOperationResponseDto> {
     const { tasks: taskIds, action } = batchOperation;
 
     try {
-      // ✅ OPTIMIZED: Validate all tasks exist in a single query
-      const { existing, missing } = await this.tasksService.validateTasksExist(taskIds);
+      // ✅ AUTHORIZATION: Validate user can access these tasks
+      const { existing, missing } = await this.tasksService.validateTasksExist(taskIds, user.id, user.role);
 
       if (missing.length > 0) {
         return {
           success: false,
-          message: `Tasks not found: ${missing.join(', ')}`,
+          message: `Tasks not found or access denied: ${missing.join(', ')}`,
           processed: 0,
           failed: missing.length,
           failedTaskIds: missing
@@ -145,10 +154,10 @@ export class TasksController {
       let result;
       switch (action) {
         case BatchAction.COMPLETE:
-          result = await this.tasksService.bulkUpdateStatus(existing, TaskStatus.COMPLETED);
+          result = await this.tasksService.bulkUpdateStatus(existing, TaskStatus.COMPLETED, user.id, user.role);
           break;
         case BatchAction.DELETE:
-          result = await this.tasksService.bulkDelete(existing);
+          result = await this.tasksService.bulkDelete(existing, user.id, user.role);
           break;
         default:
           throw new HttpException(`Unknown action: ${action}`, HttpStatus.BAD_REQUEST);
@@ -178,9 +187,11 @@ export class TasksController {
     status: 201,
     description: 'Bulk create operation completed',
   })
-  async bulkCreate(@Body() createTaskDtos: CreateTaskDto[]) {
+  async bulkCreate(@Body() createTaskDtos: CreateTaskDto[], @CurrentUser() user: any) {
     try {
-      const result = await this.tasksService.bulkCreate(createTaskDtos);
+      // ✅ AUTHORIZATION: Add userId to all tasks
+      const tasksWithUser = createTaskDtos.map(dto => ({ ...dto, userId: user.id }));
+      const result = await this.tasksService.bulkCreate(tasksWithUser);
 
       return {
         success: true,
@@ -204,9 +215,10 @@ export class TasksController {
     status: 200,
     description: 'Bulk update operation completed',
   })
-  async bulkUpdate(@Body() updates: { id: string; data: Partial<UpdateTaskDto> }[]) {
+  async bulkUpdate(@Body() updates: { id: string; data: Partial<UpdateTaskDto> }[], @CurrentUser() user: any) {
     try {
-      const result = await this.tasksService.bulkUpdate(updates);
+      // ✅ AUTHORIZATION: Pass user info for ownership checks
+      const result = await this.tasksService.bulkUpdate(updates, user.id, user.role);
 
       return {
         success: true,
